@@ -645,6 +645,9 @@ class FuncPtr():
                     if seg.perm & idaapi.SEGPERM_EXEC:
 
                         # Search all instances of CALL /2 imm32/64 - FF 15
+                        # TODO: Alternative pointer calls using SIB: FF 14 E5 11 22 33 44 - call dword ptr [0x44332211]
+                        #                                            FF 14 65 11 22 33 44
+                        #                                            FF 14 25 11 22 33 44
                         call_ea = seg.startEA
                         while True:
                             call_ea = idaapi.find_binary(call_ea + 1, seg.endEA, "FF 15", 16, idaapi.SEARCH_DOWN)
@@ -652,6 +655,9 @@ class FuncPtr():
                             ptr_calls.append( call_ea )
 
                         # Search all instances of JMP /2 imm32/64 - FF 25
+                        # TODO: Alternative pointer calls using SIB: FF 24 E5 11 22 33 44 - jmp dword ptr [0x44332211]
+                        #                                            FF 24 65 11 22 33 44
+                        #                                            FF 24 25 11 22 33 44
                         call_ea = seg.startEA
                         while True:
                             call_ea = idaapi.find_binary(call_ea + 1, seg.endEA, "FF 25", 16, idaapi.SEARCH_DOWN)
@@ -895,6 +901,8 @@ class Rop():
 
     def __init__(self, sploiter):
         
+        self.debug        = True
+
         self.regnames     = idaapi.ph_get_regnames()
 
         self.sploiter     = sploiter
@@ -905,7 +913,7 @@ class Rop():
         self.insn_cache = dict()
 
         # Extra bytes to read to ensure correct decoding of
-        # RETN and RETN imm16 instructions.
+        # RETN, RETN imm16, CALL /2, and JMP /4 instructions.
         self.dbg_read_extra = 3
 
         self.insn_arithmetic_ops = ["inc","dec","neg", "add","sub","mul","imul","div","idiv","adc","sbb","lea"]
@@ -970,6 +978,63 @@ class Rop():
 
                                 self.retns.append( (ea, m.file))
 
+                        # Search all instances of JMP reg (FF /4) and CALL reg (FF /2)
+                        ea = seg.startEA
+                        while True:
+                            ea = idaapi.find_binary(ea + 1, seg.endEA, "FF", 16, idaapi.SEARCH_DOWN)
+                            if ea == idaapi.BADADDR: break
+
+                            # Read imm16 value and filter large values
+                            jop = idaapi.dbg_read_memory ( ea + 1, 0x2)
+
+                            ###################################################
+                            # JOP
+
+                            # JMP reg
+                            if jop[0] in ["\xe0","\xe1","\xe2","\xe3","\xe4","\xe5","\xe6","\xe7"]:
+                                self.retns.append( (ea, m.file))
+
+                            # JMP [ reg + [disp] ] no SIB
+                            #   [reg] no *SP,*BP
+                            #   [reg + imm8] no *SP
+                            #   [reg + imm32] no *SP
+                            # NOTE: Do not include pure [disp] instruction.
+                            elif jop[0] in ["\x20","\x21","\x22","\x23","\x26","\x27"] or \
+                                 jop[0] in ["\x60","\x61","\x62","\x63","\x65","\x66","\x67"] or \
+                                 jop[0] in ["\xa0","\xa1","\xa2","\xa3","\xa5","\xa6","\xa7"]:
+                                self.retns.append( (ea, m.file))
+
+                            # JMP [ reg + [disp] ] SIB
+                            # NOTE: Do no include pure [disp] instructions in SIB ([*] - none)
+                            elif jop[0] in ["\x24","\x64","\xa4"] and not jop[1] in ["\x25","\x65","\xad","\xe5"]:
+                                self.retns.append( (ea, m.file))
+
+                            ###################################################
+                            # COP
+
+                            # CALL reg
+                            elif jop[0] in ["\xd0","\xd1","\xd2","\xd3","\xd4","\xd5","\xd6","\xd7"]:
+                                self.retns.append( (ea, m.file))
+
+                            # CALL [ reg + [disp] ] no SIB
+                            #   [reg] no *SP,*BP
+                            #   [reg + imm8] no *SP
+                            #   [reg + imm32] no *SP
+                            # NOTE: Do not include pure [disp] instruction.
+                            elif jop[0] in ["\x10","\x11","\x12","\x13","\x16","\x17"] or \
+                                 jop[0] in ["\x50","\x51","\x52","\x53","\x55","\x56","\x57"] or \
+                                 jop[0] in ["\x90","\x91","\x92","\x93","\x95","\x96","\x97"]:
+                                self.retns.append( (ea, m.file))
+
+                            # CALL [ reg + [disp] ] SIB
+                            # NOTE: Do no include pure [disp] instructions in SIB ([*] - none)
+                            elif jop[0] in ["\x14","\x54","\x94"] and not jop[1] in ["\x25","\x65","\xad","\xe5"]:
+                                self.retns.append( (ea, m.file))
+
+
+
+        print "[idasploiter] Found %d returns" % len(self.retns)
+
     def search_gadgets(self):
 
         count_total = len(self.retns)
@@ -982,7 +1047,7 @@ class Rop():
         breakFlag = False
 
         # Show wait dialog
-        idaapi.show_wait_box("Searching ROP gadgets: 00%%%%")
+        if not self.debug: idaapi.show_wait_box("Searching gadgets: 00%%%%")
 
         for (retn, module) in self.retns:
 
@@ -996,7 +1061,7 @@ class Rop():
             #        Try to read and cache self.maxRopOffset bytes back. In cases where it is not possible,
             #        then simply try to read the largest chunk.
             
-            # NOTE: Read a bit extra to cover correct decoding of RETN and RETN imm16 instructions.
+            # NOTE: Read a bit extra to cover correct decoding of RETN, RETN imm16, CALL /2, and JMP /4 instructions.
 
             for i in range(self.maxRopOffset):
                 self.dbg_mem_cache = idaapi.dbg_read_memory(retn - self.maxRopOffset + i, self.maxRopOffset - i + self.dbg_read_extra)
@@ -1062,7 +1127,7 @@ class Rop():
                 break
 
             # Progress report
-            if count_curr >= count_notify:
+            if not self.debug and count_curr >= count_notify:
 
                 # NOTE: Need to use %%%% to escape both Python and IDA's format strings
                 idaapi.replace_wait_box("Searching ROP gadgets: %02d%%%%" % (count_curr*100/count_total) ) 
@@ -1072,7 +1137,7 @@ class Rop():
             count_curr += 1            
 
         print "[idasploiter] Found %d ROP gadgets." % len(self.gadgets)
-        idaapi.hide_wait_box()
+        if not self.debug: idaapi.hide_wait_box()
 
 
     # Attempt to build a gadget at the provided start address
@@ -1166,7 +1231,7 @@ class Rop():
 
                         #######################################################
                         # Decode and Cache instruction characteristics
-                        self.insn_cache[dbg_mem] = self.decode_instruction(insn, ea)
+                        self.insn_cache[dbg_mem] = self.decode_instruction(insn, ea, retn)
 
                     ##################################################################
                     # Retrieve cached instruction and apply it to the gadget    
@@ -1179,17 +1244,14 @@ class Rop():
                         insn_disas = self.insn_cache[dbg_mem]["insn_disas"]
                         instructions.append(insn_disas)
 
-                        # Check if we found a RETN instruction
-                        if insn_mnem == "retn":
+                        # Expected ending address of the gadget
+                        if ea == retn:
+                            gadget = Gadget(instructions, pivot, operations, chg_registers, use_registers)
+                            return gadget
 
-                            # RETN at the expected address
-                            if ea == retn:
-                                gadget = Gadget(instructions, pivot, operations, chg_registers, use_registers)
-                                return gadget
-
-                            # RETN at an unexpected address
-                            else:
-                                return None
+                        # Unexpected return
+                        elif insn_mnem == "retn":
+                            return None
 
                         # Add instruction instruction characteristics to the gadget
                         else:
@@ -1271,7 +1333,7 @@ class Rop():
     ###############################################################
     # Decode instruction
 
-    def decode_instruction(self, insn, ea):
+    def decode_instruction(self, insn, ea, retn):
 
         # Instruction specific characteristics
         insn_chg_registers = set()
@@ -1327,22 +1389,25 @@ class Rop():
         # Filter gadget
         ###############################################################
 
-        # Filter gadgets with instructions that don't forward execution to the next address
-        if insn_feature & idaapi.CF_STOP and insn_mnem != "retn":
-            return None
+        # Only filter instructions prior to the last RETN/JOP/COP instruction
+        if ea != retn:
 
-        # Filter gadgets with instructions in a bad list
-        elif insn_mnem in self.ropBadMnems:
-            return None
+            # Filter gadgets with instructions that don't forward execution to the next address
+            if insn_feature & idaapi.CF_STOP:
+                return None
 
-        # Filter gadgets with jump instructions
-        # Note: conditional jumps may still be useful if we can
-        #       set flags prior to calling them.
-        elif not self.ropAllowJcc and insn_mnem[0] == "j":
-            return None
+            # Filter gadgets with instructions in a bad list
+            elif insn_mnem in self.ropBadMnems:
+                return None
 
-        elif insn_mnem == "jmp":
-            return None
+            # Filter gadgets with jump instructions
+            # Note: conditional jumps may still be useful if we can
+            #       set flags prior to calling them.
+            elif not self.ropAllowJcc and insn_mnem[0] == "j":
+                return None
+
+            elif insn_mnem == "jmp":
+                return None
 
         ###############################################################
         # Get disassembly
@@ -3470,10 +3535,6 @@ def idasploiter_main():
     idasploiter_manager.add_menu_items()
 
     sploiter = idasploiter_manager.sploiter
-
-    #sploiter.process_modules()
-    #mod = ModuleView(sploiter)
-    #mod.show()
 
 if __name__ == '__main__':
     #idasploiter_main()
