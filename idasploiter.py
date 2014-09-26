@@ -646,7 +646,7 @@ class FuncPtr():
                     if seg.perm & idaapi.SEGPERM_EXEC:
 
                         # Search all instances of CALL /2 imm32/64 - FF 15
-                        # TODO: Alternative pointer calls using SIB: FF 14 E5 11 22 33 44 - call dword ptr [0x44332211]
+                        # TODO: Alternative pointer calls using SIB: FF 14 E5 11 22 33 44 - call dword/qword ptr [0x44332211]
                         #                                            FF 14 65 11 22 33 44
                         #                                            FF 14 25 11 22 33 44
                         call_ea = seg.startEA
@@ -656,7 +656,7 @@ class FuncPtr():
                             ptr_calls.append( call_ea )
 
                         # Search all instances of JMP /2 imm32/64 - FF 25
-                        # TODO: Alternative pointer calls using SIB: FF 24 E5 11 22 33 44 - jmp dword ptr [0x44332211]
+                        # TODO: Alternative pointer calls using SIB: FF 24 E5 11 22 33 44 - jmp dword/qword ptr [0x44332211]
                         #                                            FF 24 65 11 22 33 44
                         #                                            FF 24 25 11 22 33 44
                         call_ea = seg.startEA
@@ -992,7 +992,7 @@ class Rop():
                             ea = idaapi.find_binary(ea + 1, seg.endEA, "FF", 16, idaapi.SEARCH_DOWN)
                             if ea == idaapi.BADADDR: break
 
-                            # Read imm16 value and filter large values
+                            # Read ModR/M and SIB bytes
                             jop = idaapi.dbg_read_memory ( ea + 1, 0x2)
 
                             ###################################################
@@ -1003,16 +1003,13 @@ class Rop():
                                 self.retns.append( (ea, m.file))
 
                             # JMP [reg] no SIB
-                            #   [reg] no *SP,*BP
-                            #   [reg + imm8] no *SP
-                            #   [reg + imm32] no *SP
                             # NOTE: Do not include pure [disp] instruction.
-                            elif jop[0] in ["\x20","\x21","\x22","\x23","\x26","\x27"] or \
-                                 jop[0] in ["\x60","\x61","\x62","\x63","\x65","\x66","\x67"] or \
-                                 jop[0] in ["\xa0","\xa1","\xa2","\xa3","\xa5","\xa6","\xa7"]:
+                            elif jop[0] in ["\x20","\x21","\x22","\x23",              "\x26","\x27",   # [reg] no *SP,*BP
+                                            "\x60","\x61","\x62","\x63",       "\x65","\x66","\x67",   # [reg + imm8] no *SP
+                                            "\xa0","\xa1","\xa2","\xa3",       "\xa5","\xa6","\xa7"]:  # [reg + imm32] no *SP
                                 self.retns.append( (ea, m.file))
 
-                            # JMP [reg] SIB
+                            # JMP [reg] with SIB
                             # NOTE: Do no include pure [disp] instructions in SIB ([*] - none)
                             elif jop[0] in ["\x24","\x64","\xa4"] and not jop[1] in ["\x25","\x65","\xad","\xe5"]:
                                 self.retns.append( (ea, m.file))
@@ -1024,17 +1021,14 @@ class Rop():
                             elif jop[0] in ["\xd0","\xd1","\xd2","\xd3","\xd4","\xd5","\xd6","\xd7"]:
                                 self.retns.append( (ea, m.file))
 
-                            # CALL [ reg + [disp] ] no SIB
-                            #   [reg] no *SP,*BP
-                            #   [reg + imm8] no *SP
-                            #   [reg + imm32] no *SP
+                            # CALL [reg] no SIB
                             # NOTE: Do not include pure [disp] instruction.
-                            elif jop[0] in ["\x10","\x11","\x12","\x13","\x16","\x17"] or \
-                                 jop[0] in ["\x50","\x51","\x52","\x53","\x55","\x56","\x57"] or \
-                                 jop[0] in ["\x90","\x91","\x92","\x93","\x95","\x96","\x97"]:
+                            elif jop[0] in ["\x10","\x11","\x12","\x13",              "\x16","\x17",   # [reg] no *SP,*BP
+                                            "\x50","\x51","\x52","\x53",       "\x55","\x56","\x57",   # [reg + imm8] no *SP
+                                            "\x90","\x91","\x92","\x93",       "\x95","\x96","\x97"]:  # [reg + imm32] no *SP
                                 self.retns.append( (ea, m.file))
 
-                            # CALL [ reg + [disp] ] SIB
+                            # CALL [reg] with SIB
                             # NOTE: Do no include pure [disp] instructions in SIB ([*] - none)
                             elif jop[0] in ["\x14","\x54","\x94"] and not jop[1] in ["\x25","\x65","\xad","\xe5"]:
                                 self.retns.append( (ea, m.file))
@@ -1055,7 +1049,7 @@ class Rop():
         # Show wait dialog
         if not self.debug: idaapi.show_wait_box("Searching gadgets: 00%%%%")
 
-        for (retn, module) in self.retns:
+        for (ea_end, module) in self.retns:
 
             # Flush the gadgets cache for each new retn pointer
             self.gadgets_cache = dict()
@@ -1070,7 +1064,7 @@ class Rop():
             # NOTE: Read a bit extra to cover correct decoding of RETN, RETN imm16, CALL /2, and JMP /4 instructions.
 
             for i in range(self.maxRopOffset):
-                self.dbg_mem_cache = idaapi.dbg_read_memory(retn - self.maxRopOffset + i, self.maxRopOffset - i + self.dbg_read_extra)
+                self.dbg_mem_cache = idaapi.dbg_read_memory(ea_end - self.maxRopOffset + i, self.maxRopOffset - i + self.dbg_read_extra)
                 if self.dbg_mem_cache != None:
                     break
 
@@ -1079,7 +1073,7 @@ class Rop():
             #       even with bad bytes in the middle.
             for i in range(1, len(self.dbg_mem_cache) - self.dbg_read_extra):
 
-                ea = retn - i
+                ea = ea_end - i
 
                 # Get pointer charset
                 ptr_charset = self.sploiter.get_ptr_charset(ea)
@@ -1095,7 +1089,7 @@ class Rop():
                 if self.ptrAlpha      and not "alpha"      in ptr_charset: continue
 
                 # Try to build a gadget at the pointer
-                gadget = self.build_gadget(ea, retn)
+                gadget = self.build_gadget(ea, ea_end)
 
                 # Successfully built the gadget
                 if gadget:
@@ -1148,7 +1142,7 @@ class Rop():
 
     # Attempt to build a gadget at the provided start address
     # by verifying it properly terminates at the expected RETN.
-    def build_gadget(self, ea, retn):
+    def build_gadget(self, ea, ea_end):
 
         instructions  = list()
         chg_registers = set()
@@ -1157,7 +1151,7 @@ class Rop():
         pivot         = 0
 
         # Process each instruction in the gadget
-        while ea <= retn:
+        while ea <= ea_end:
 
             ###################################################################
             # Gadget Level Cache:
@@ -1207,7 +1201,7 @@ class Rop():
                 if insn_size:
 
                     # Decoded instruction is too big to be a RETN or RETN imm16
-                    if ea + insn_size > retn + self.dbg_read_extra:
+                    if ea + insn_size > ea_end + self.dbg_read_extra:
                         return None
 
                     ###############################################################
@@ -1221,7 +1215,7 @@ class Rop():
                     #dbg_mem = idaapi.dbg_read_memory( ea, insn_size)
                     
                     # Read instruction from memory cache
-                    dbg_mem_offset = ea - (retn - (len(self.dbg_mem_cache) - self.dbg_read_extra) )
+                    dbg_mem_offset = ea - (ea_end - (len(self.dbg_mem_cache) - self.dbg_read_extra) )
                     dbg_mem = self.dbg_mem_cache[dbg_mem_offset:dbg_mem_offset + insn_size]
 
                     # Create instruction cache if it doesn't already exist
@@ -1237,7 +1231,7 @@ class Rop():
 
                         #######################################################
                         # Decode and Cache instruction characteristics
-                        self.insn_cache[dbg_mem] = self.decode_instruction(insn, ea, retn)
+                        self.insn_cache[dbg_mem] = self.decode_instruction(insn, ea, ea_end)
 
                     ##################################################################
                     # Retrieve cached instruction and apply it to the gadget    
@@ -1250,15 +1244,25 @@ class Rop():
                         insn_disas = self.insn_cache[dbg_mem]["insn_disas"]
                         instructions.append(insn_disas)
 
-                        # Expected ending address of the gadget
-                        if ea == retn:
+                        #######################################################
+                        # Expected ending instruction of the gadget
+                        if ea == ea_end:
                             gadget = Gadget(instructions, pivot, operations, chg_registers, use_registers)
                             return gadget
 
-                        # Unexpected return
+                        #######################################################
+                        # Filter out of place ROP/JOP/COP terminators
+                        # NOTE: retn/jmp/call are allowed, but only in the last position
+
+                        # Unexpected return instruction
                         elif insn_mnem == "retn":
                             return None
 
+                        # Unexpected call/jmp instruction
+                        elif insn_mnem in ["jmp","call"]:
+                            return None
+
+                        #######################################################
                         # Add instruction instruction characteristics to the gadget
                         else:
 
@@ -1272,7 +1276,6 @@ class Rop():
                                 operations.add(op)
 
                             pivot += self.insn_cache[dbg_mem]["insn_pivot"]
-
 
                     # Previous attempt to decode the instruction invalidated the gadget
                     else:                        
@@ -1299,7 +1302,7 @@ class Rop():
                     #dbg_mem = idaapi.dbg_read_memory( ea, 0x2)
 
                     # Read two bytes from memory cache at current instruction candidate
-                    dbg_mem_offset = ea - (retn - self.maxRopOffset)
+                    dbg_mem_offset = ea - (ea_end - self.maxRopOffset)
                     dbg_mem = self.dbg_mem_cache[dbg_mem_offset:dbg_mem_offset + 2]
 
                     # Compare to two zero bytes
@@ -1339,7 +1342,7 @@ class Rop():
     ###############################################################
     # Decode instruction
 
-    def decode_instruction(self, insn, ea, retn):
+    def decode_instruction(self, insn, ea, ea_end):
 
         # Instruction specific characteristics
         insn_chg_registers = set()
@@ -1395,8 +1398,9 @@ class Rop():
         # Filter gadget
         ###############################################################
 
-        # Only filter instructions prior to the last RETN/JOP/COP instruction
-        if ea != retn:
+        # Do not filter ROP, JOP, COP, always decode them
+        # NOTE: A separate check must be done to check if they are out of place.
+        if not insn_mnem in ["retn","jmp","call"]:
 
             # Filter gadgets with instructions that don't forward execution to the next address
             if insn_feature & idaapi.CF_STOP:
@@ -1410,9 +1414,6 @@ class Rop():
             # Note: conditional jumps may still be useful if we can
             #       set flags prior to calling them.
             elif not self.ropAllowJcc and insn_mnem[0] == "j":
-                return None
-
-            elif insn_mnem == "jmp":
                 return None
 
         ###############################################################
@@ -2083,7 +2084,7 @@ Pointer Charset:                  Search Settings:
                 'intMaxRetn'      : Form.NumericInput(swidth=4,tp=Form.FT_DEC,value=40),
                 'strBadChars'     : Form.StringInput(swidth=70,tp=Form.FT_ASCII),
                 'radUnicode'      : Form.RadGroupControl(("rUnicodeANSI","rUnicodeOEM","rUnicodeUTF7","rUnicodeUTF8")),
-                'strBadMnems'     : Form.StringInput(swidth=70,tp=Form.FT_ASCII,value="leave, call, int, into, enter, syscall, sysenter, sysexit, sysret, in, out, loop, loope, loopne, lock, rep, repe, repz, repne, repnz"),
+                'strBadMnems'     : Form.StringInput(swidth=70,tp=Form.FT_ASCII,value="leave, int, into, enter, syscall, sysenter, sysexit, sysret, in, out, loop, loope, loopne, lock, rep, repe, repz, repne, repnz"),
                 'FormChangeCb'    : Form.FormChangeCb(self.OnFormChange),
             })
 
@@ -3553,5 +3554,5 @@ def idasploiter_main():
     sploiter = idasploiter_manager.sploiter
 
 if __name__ == '__main__':
-    idasploiter_main()
+    #idasploiter_main()
     pass
