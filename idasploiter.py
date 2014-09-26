@@ -642,6 +642,7 @@ class FuncPtr():
 
                     # Locate executable segments
                     # NOTE: Each module may have multiple executable segments
+                    # TODO: Search for "MOV REG, PTR # CALL REG"
                     if seg.perm & idaapi.SEGPERM_EXEC:
 
                         # Search all instances of CALL /2 imm32/64 - FF 15
@@ -901,7 +902,7 @@ class Rop():
 
     def __init__(self, sploiter):
         
-        self.debug        = True
+        self.debug        = False
 
         self.regnames     = idaapi.ph_get_regnames()
 
@@ -914,7 +915,7 @@ class Rop():
 
         # Extra bytes to read to ensure correct decoding of
         # RETN, RETN imm16, CALL /2, and JMP /4 instructions.
-        self.dbg_read_extra = 3
+        self.dbg_read_extra = 6 # FF + ModR/M + SIB + disp32 
 
         self.insn_arithmetic_ops = ["inc","dec","neg", "add","sub","mul","imul","div","idiv","adc","sbb","lea"]
         self.insn_bit_ops = ["not","and","or","xor","shr","shl","sar","sal","shld","shrd","ror","rcr","rcl"]
@@ -950,12 +951,15 @@ class Rop():
             for n in xrange(idaapi.get_segm_qty()):
                 seg = idaapi.getnseg(n)
 
-                # Segment in a selected modules
-                if seg and seg.startEA >= m.addr and seg.endEA <= (m.addr + m.size):
+                # Locate executable segments in a selected modules
+                # NOTE: Each module may have multiple executable segments
+                if seg and \
+                   seg.startEA >= m.addr and seg.endEA <= (m.addr + m.size) and \
+                   seg.perm & idaapi.SEGPERM_EXEC:
 
-                    # Locate executable segments
-                    # NOTE: Each module may have multiple executable segments
-                    if seg.perm & idaapi.SEGPERM_EXEC:
+                    #######################################################
+                    # Search for ROP gadgets
+                    if self.searchRop:
 
                         #Search all instances of RETN 
                         ea = seg.startEA
@@ -978,6 +982,10 @@ class Rop():
 
                                 self.retns.append( (ea, m.file))
 
+                    #######################################################
+                    # Search for JOP gadgets
+                    if self.searchJop:
+
                         # Search all instances of JMP reg (FF /4) and CALL reg (FF /2)
                         ea = seg.startEA
                         while True:
@@ -994,7 +1002,7 @@ class Rop():
                             if jop[0] in ["\xe0","\xe1","\xe2","\xe3","\xe4","\xe5","\xe6","\xe7"]:
                                 self.retns.append( (ea, m.file))
 
-                            # JMP [ reg + [disp] ] no SIB
+                            # JMP [reg] no SIB
                             #   [reg] no *SP,*BP
                             #   [reg + imm8] no *SP
                             #   [reg + imm32] no *SP
@@ -1004,7 +1012,7 @@ class Rop():
                                  jop[0] in ["\xa0","\xa1","\xa2","\xa3","\xa5","\xa6","\xa7"]:
                                 self.retns.append( (ea, m.file))
 
-                            # JMP [ reg + [disp] ] SIB
+                            # JMP [reg] SIB
                             # NOTE: Do no include pure [disp] instructions in SIB ([*] - none)
                             elif jop[0] in ["\x24","\x64","\xa4"] and not jop[1] in ["\x25","\x65","\xad","\xe5"]:
                                 self.retns.append( (ea, m.file))
@@ -1030,8 +1038,6 @@ class Rop():
                             # NOTE: Do no include pure [disp] instructions in SIB ([*] - none)
                             elif jop[0] in ["\x14","\x54","\x94"] and not jop[1] in ["\x25","\x65","\xad","\xe5"]:
                                 self.retns.append( (ea, m.file))
-
-
 
         print "[idasploiter] Found %d returns" % len(self.retns)
 
@@ -1069,7 +1075,7 @@ class Rop():
                     break
 
             # Search all possible gadgets up to maxoffset bytes back
-            # NOTE: try all byte combinations to capture longer/more instructions
+            # NOTE: Try all byte combinations to capture longer/more instructions
             #       even with bad bytes in the middle.
             for i in range(1, len(self.dbg_mem_cache) - self.dbg_read_extra):
 
@@ -1130,13 +1136,13 @@ class Rop():
             if not self.debug and count_curr >= count_notify:
 
                 # NOTE: Need to use %%%% to escape both Python and IDA's format strings
-                idaapi.replace_wait_box("Searching ROP gadgets: %02d%%%%" % (count_curr*100/count_total) ) 
+                idaapi.replace_wait_box("Searching gadgets: %02d%%%%" % (count_curr*100/count_total) ) 
 
                 count_notify += 0.10 * count_total
 
             count_curr += 1            
 
-        print "[idasploiter] Found %d ROP gadgets." % len(self.gadgets)
+        print "[idasploiter] Found %d gadgets." % len(self.gadgets)
         if not self.debug: idaapi.hide_wait_box()
 
 
@@ -1310,7 +1316,7 @@ class Rop():
                         ea += 2
 
                     # "MOV Sreg, r/m16" instructions will result in illegal instruction exception: c000001d
-                    # or the memory couldn't be read exception: c0000005 which we don't want in our ROP gadgets.
+                    # or the memory couldn't be read exception: c0000005 which we don't want in our gadgets.
                     elif dbg_mem[0] == "\x8E":
                         return None
 
@@ -1763,6 +1769,10 @@ class Sploiter():
                 self.rop.maxRops       = f.intMaxRops.value
                 self.rop.maxRetn       = f.intMaxRetn.value
 
+                # Gadget search values
+                self.rop.searchRop     = f.cRopSearch.checked
+                self.rop.searchJop     = f.cJopSearch.checked
+
                 # Search for returns and ROP gadgets
                 self.rop.search_retns()
                 self.rop.search_gadgets()
@@ -1924,7 +1934,7 @@ class ModuleView(Choose2):
         # Add extra context menu commands
         # NOTE: Make sure you check for duplicates
         if self.cmd_search_gadgets == None:
-            self.cmd_search_gadgets = self.AddCommand("Search ROP gadgets...", flags = idaapi.CHOOSER_POPUP_MENU | idaapi.CHOOSER_MULTI_SELECTION, icon=182 )
+            self.cmd_search_gadgets = self.AddCommand("Search gadgets...", flags = idaapi.CHOOSER_POPUP_MENU | idaapi.CHOOSER_MULTI_SELECTION, icon=182 )
         if self.cmd_search_pointers == None:
             self.cmd_search_pointers = self.AddCommand("Search function pointers...", flags = idaapi.CHOOSER_POPUP_MENU | idaapi.CHOOSER_MULTI_SELECTION, icon=143 )
 
@@ -2032,7 +2042,7 @@ class ModuleView(Choose2):
 ###############################################################################
 
 ###############################################################################
-# ROP Form
+# ROP/JOP/COP Form
 
 class RopForm(Form):
 
@@ -2058,13 +2068,15 @@ Pointer Charset:                  Search Settings:
 <alpha:{cPtrAlpha}>         <Max RETN imm16  :{intMaxRetn}>
 <numeric:{cPtrNum}>{ptrGroup}>       <Max ROP gadgets :{intMaxRops}>
                 Other settings  <Allow conditional jumps:{cRopAllowJcc}>
-                <Do not allow bad bytes:{cRopNoBadBytes}>{ropGroup}>
+                <Do not allow bad bytes:{cRopNoBadBytes}>
+                <Search for ROP gadgets:{cRopSearch}>
+                <Search for JOP gadgets:{cJopSearch}>{ropGroup}>
 
 
 """, {
                 'cEChooser'       : Form.EmbeddedChooserControl(self.mod, swidth=131),
                 'ptrGroup'        : Form.ChkGroupControl(("cPtrNonull", "cPtrAscii", "cPtrAsciiPrint", "cPtrUnicode",'cPtrAlphaNum','cPtrAlpha','cPtrNum')),
-                'ropGroup'        : Form.ChkGroupControl(('cRopAllowJcc','cRopNoBadBytes')),
+                'ropGroup'        : Form.ChkGroupControl(('cRopAllowJcc','cRopNoBadBytes','cRopSearch','cJopSearch')),
                 'intMaxRopSize'   : Form.NumericInput(swidth=4,tp=Form.FT_DEC,value=6),
                 'intMaxRopOffset' : Form.NumericInput(swidth=4,tp=Form.FT_DEC,value=40),
                 'intMaxRops'      : Form.NumericInput(swidth=4,tp=Form.FT_DEC,value=0),
@@ -2092,6 +2104,10 @@ Pointer Charset:                  Search Settings:
                         self.select_list.append(i)
 
             self.SetControlValue(self.cEChooser, self.select_list)
+
+            # Enable both ROP and JOP search by default
+            self.SetControlValue(self.cRopSearch, True)
+            self.SetControlValue(self.cJopSearch, True)
 
         # Form OK pressed
         elif fid == -2:
@@ -3400,7 +3416,7 @@ class SploitManager():
         if self.add_menu_item_helper("View/Open subviews/Segments", "Modules", "Shift+F6", 0, self.show_modules_view, None): return 1
 
         if self.add_menu_item_helper("Search/all error operands", "function pointers...", "Alt+f", 1, self.show_funcptr_view, None): return 1
-        if self.add_menu_item_helper("Search/all error operands", "ROP gadgets...", "Alt+r", 1, self.show_rop_view, None): return 1
+        if self.add_menu_item_helper("Search/all error operands", "gadgets...", "Alt+r", 1, self.show_rop_view, None): return 1
 
         if self.add_menu_item_helper("Edit/Begin selection", "Create pattern...", "Shift+c", 0, self.show_pattern_create, None): return 1
         if self.add_menu_item_helper("Edit/Begin selection", "Detect pattern...", "Shift+d", 0, self.show_pattern_detect, None): return 1
@@ -3537,5 +3553,5 @@ def idasploiter_main():
     sploiter = idasploiter_manager.sploiter
 
 if __name__ == '__main__':
-    #idasploiter_main()
+    idasploiter_main()
     pass
