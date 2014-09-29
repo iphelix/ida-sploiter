@@ -902,6 +902,12 @@ class Rop():
 
     def __init__(self, sploiter):
         
+        self.maxRopOffset = 40 # Maximum offset from the return instruction to look for gadgets. default: 40
+        self.maxRopSize   = 6  # Maximum number of instructions to look for gadgets. default: 6
+        self.maxRetnImm   = 64 # Maximum imm16 value in retn. default: 64
+        self.maxJopImm    = 255 # Maximum jop [reg + IMM] value. default: 64
+        self.maxRops      = 0  # Maximum number of ROP chains to find. default: 0 (unlimited)
+
         self.debug        = False
 
         self.regnames     = idaapi.ph_get_regnames()
@@ -978,7 +984,7 @@ class Rop():
                             retn_imm16 = idaapi.dbg_read_memory ( ea + 1, 0x2)
                             retn_imm16 = unpack("<H", retn_imm16)[0]
 
-                            if retn_imm16 <= self.maxRetn:
+                            if retn_imm16 <= self.maxRetnImm:
 
                                 self.retns.append( (ea, m.file))
 
@@ -992,46 +998,66 @@ class Rop():
                             ea = idaapi.find_binary(ea + 1, seg.endEA, "FF", 16, idaapi.SEARCH_DOWN)
                             if ea == idaapi.BADADDR: break
 
-                            # Read ModR/M and SIB bytes
-                            jop = idaapi.dbg_read_memory ( ea + 1, 0x2)
+                            # Read possible ModR/M, SIB, and IMM8/IMM32 bytes
+                            jop = idaapi.dbg_read_memory ( ea + 1, 0x6)
 
                             ###################################################
-                            # JOP
-
-                            # JMP reg
-                            if jop[0] in ["\xe0","\xe1","\xe2","\xe3","\xe4","\xe5","\xe6","\xe7"]:
-                                self.retns.append( (ea, m.file))
-
-                            # JMP [reg] no SIB
-                            # NOTE: Do not include pure [disp] instruction.
-                            elif jop[0] in ["\x20","\x21","\x22","\x23",              "\x26","\x27",   # [reg] no *SP,*BP
-                                            "\x60","\x61","\x62","\x63",       "\x65","\x66","\x67",   # [reg + imm8] no *SP
-                                            "\xa0","\xa1","\xa2","\xa3",       "\xa5","\xa6","\xa7"]:  # [reg + imm32] no *SP
-                                self.retns.append( (ea, m.file))
-
-                            # JMP [reg] with SIB
-                            # NOTE: Do no include pure [disp] instructions in SIB ([*] - none)
-                            elif jop[0] in ["\x24","\x64","\xa4"] and not jop[1] in ["\x25","\x65","\xad","\xe5"]:
+                            # JMP/CALL reg
+                            if jop[0] in ["\xe0","\xe1","\xe2","\xe3","\xe4","\xe5","\xe6","\xe7",
+                                          "\xd0","\xd1","\xd2","\xd3","\xd4","\xd5","\xd6","\xd7"]:
                                 self.retns.append( (ea, m.file))
 
                             ###################################################
-                            # COP
-
-                            # CALL reg
-                            elif jop[0] in ["\xd0","\xd1","\xd2","\xd3","\xd4","\xd5","\xd6","\xd7"]:
-                                self.retns.append( (ea, m.file))
-
-                            # CALL [reg] no SIB
+                            # JMP/CALL [reg] no SIB
                             # NOTE: Do not include pure [disp] instruction.
-                            elif jop[0] in ["\x10","\x11","\x12","\x13",              "\x16","\x17",   # [reg] no *SP,*BP
-                                            "\x50","\x51","\x52","\x53",       "\x55","\x56","\x57",   # [reg + imm8] no *SP
-                                            "\x90","\x91","\x92","\x93",       "\x95","\x96","\x97"]:  # [reg + imm32] no *SP
+
+                            # JMP/CALL [reg] no *SP,*BP
+                            elif jop[0] in ["\x20","\x21","\x22","\x23","\x26","\x27", 
+                                            "\x10","\x11","\x12","\x13","\x16","\x17"]:
                                 self.retns.append( (ea, m.file))
 
-                            # CALL [reg] with SIB
+                            # JMP/CALL [reg + imm8] no *SP
+                            elif jop[0] in ["\x60","\x61","\x62","\x63","\x65","\x66","\x67",
+                                            "\x50","\x51","\x52","\x53","\x55","\x56","\x57"]:
+                                jop_imm8 = jop[1]
+                                jop_imm8 = unpack("b", jop_imm8)[0] # signed
+
+                                if jop_imm8 <= self.maxJopImm:
+                                    self.retns.append( (ea, m.file))
+
+
+                            # JMP/CALL [reg + imm32] no *SP
+                            elif jop[0] in ["\xa0","\xa1","\xa2","\xa3","\xa5","\xa6","\xa7",
+                                            "\x90","\x91","\x92","\x93","\x95","\x96","\x97"]:
+                                jop_imm32 = jop[1:5]
+                                jop_imm32 = unpack("<i", jop_imm32)[0] # signed
+
+                                if jop_imm32 <= self.maxJopImm:
+                                    self.retns.append( (ea, m.file))
+
+                            ###################################################
+                            # JMP/CALL [reg] with SIB
                             # NOTE: Do no include pure [disp] instructions in SIB ([*] - none)
-                            elif jop[0] in ["\x14","\x54","\x94"] and not jop[1] in ["\x25","\x65","\xad","\xe5"]:
-                                self.retns.append( (ea, m.file))
+                            elif (jop[0] in ["\x24","\x64","\xa4"] and not jop[1] in ["\x25","\x65","\xad","\xe5"]) or \
+                                 (jop[0] in ["\x14","\x54","\x94"] and not jop[1] in ["\x25","\x65","\xad","\xe5"]):
+
+                                 # Check for displacement
+                                if jop[0] in ["\x64","\x54"]:
+                                    jop_imm8 = jop[2]
+                                    jop_imm8 = unpack("b", jop_imm8)[0] # signed
+
+                                    if jop_imm8 <= self.maxJopImm:
+                                        self.retns.append( (ea, m.file))
+
+                                elif jop[0] in ["\xa4","\x94"]:
+                                    jop_imm32 = jop[2:6]
+                                    jop_imm32 = unpack("<i", jop_imm32)[0] # signed
+
+                                    if jop_imm32 <= self.maxJopImm:
+                                        self.retns.append( (ea, m.file))
+
+                                else:
+                                    self.retns.append( (ea, m.file))
 
         print "[idasploiter] Found %d returns" % len(self.retns)
 
@@ -1210,9 +1236,6 @@ class Rop():
                     # Most instructions are repetitive so we can just cache
                     # unique byte combinations to avoid costly decoding more
                     # than once
-
-                    # Read instruction from memory
-                    #dbg_mem = idaapi.dbg_read_memory( ea, insn_size)
                     
                     # Read instruction from memory cache
                     dbg_mem_offset = ea - (ea_end - (len(self.dbg_mem_cache) - self.dbg_read_extra) )
@@ -1297,9 +1320,6 @@ class Rop():
                     #       "Disassemble zero opcode instructions" in Processor Options.
                     #       Since this option is normally disabled, I will attempt
                     #       to get this instruction manually.
-
-                    # Read two bytes from memory at current instruction candidate
-                    #dbg_mem = idaapi.dbg_read_memory( ea, 0x2)
 
                     # Read two bytes from memory cache at current instruction candidate
                     dbg_mem_offset = ea - (ea_end - self.maxRopOffset)
@@ -1480,6 +1500,7 @@ class Rop():
                 insn_operations.add("one-imm")
 
             # Single operand reference
+            # TODO: determine the [reg + ...] value if present
             elif insn_op1 == idaapi.o_phrase or insn_op1 == idaapi.o_displ:
                 insn_operations.add("one-mem")
 
@@ -1542,6 +1563,8 @@ class Rop():
                         insn_operations.add("reg-to-reg")
                     elif insn_op2 == idaapi.o_imm:
                         insn_operations.add("imm-to-reg")
+
+                    # TODO: determine the [reg + ...] value if present
                     elif insn_op2 == idaapi.o_phrase or insn_op2 == idaapi.o_displ:
                         insn_operations.add("mem-to-reg")
 
@@ -1565,6 +1588,7 @@ class Rop():
                     insn_use_registers.add(reg_name)
 
                 # Check for operations
+                # TODO: determine the [reg + ...] value if present
                 if insn_op1 == idaapi.o_phrase or insn_op1 == idaapi.o_displ:
                     insn_operations.add("reg-to-mem")
 
@@ -1586,10 +1610,7 @@ class Sploiter():
 
     def __init__(self):
         
-        self.maxOffset = 40  # Maximum offset from the return instruction to look for gadgets. default: 40
-        self.maxRopSize = 6  # Maximum number of instructions to look for gadgets. default: 6
-        self.maxRetn = 40    # Maximum imm16 value in retn. default: 40
-        self.maxRops = 0     # Maximum number of ROP chains to find. default: 0 (unlimited)
+
 
         # Process modules list
         self.modules = list()
@@ -1719,13 +1740,13 @@ class Sploiter():
 
     def process_rop(self, select_list = None):
 
+        # Initialize ROP gadget search engine
+        self.rop = Rop(self)
+
         # Prompt user for ROP search settings
         f = RopForm(self, select_list)
         ok = f.Execute()
         if ok == 1:
-
-            # Initialize ROP gadget search engine
-            self.rop = Rop(self)
 
             # Configure ROP gadget search engine
 
@@ -1768,7 +1789,7 @@ class Sploiter():
                 self.rop.maxRopSize    = f.intMaxRopSize.value
                 self.rop.maxRopOffset  = f.intMaxRopOffset.value
                 self.rop.maxRops       = f.intMaxRops.value
-                self.rop.maxRetn       = f.intMaxRetn.value
+                self.rop.maxRetnImm    = f.intMaxRetnImm.value
 
                 # Gadget search values
                 self.rop.searchRop     = f.cRopSearch.checked
@@ -2061,14 +2082,15 @@ Search ROP gadgets
 {FormChangeCb}<Modules:{cEChooser}>
 
 Pointer Charset:                  Search Settings:
-<nonull:{cPtrNonull}>        <Bad Chars       :{strBadChars}>     
-<unicode:{cPtrUnicode}>       Unicode Table   <ANSI:{rUnicodeANSI}><OEM:{rUnicodeOEM}><UTF7:{rUnicodeUTF7}><UTF8:{rUnicodeUTF8}>{radUnicode}>
-<ascii:{cPtrAscii}>         <Bad Instructions:{strBadMnems}>
-<asciiprint:{cPtrAsciiPrint}>    <Max ROP size    :{intMaxRopSize}>
-<alphanum:{cPtrAlphaNum}>      <Max ROP offset  :{intMaxRopOffset}>
-<alpha:{cPtrAlpha}>         <Max RETN imm16  :{intMaxRetn}>
-<numeric:{cPtrNum}>{ptrGroup}>       <Max ROP gadgets :{intMaxRops}>
-                Other settings  <Allow conditional jumps:{cRopAllowJcc}>
+<nonull:{cPtrNonull}>        <Bad Chars        :{strBadChars}>     
+<unicode:{cPtrUnicode}>       Unicode Table    <ANSI:{rUnicodeANSI}><OEM:{rUnicodeOEM}><UTF7:{rUnicodeUTF7}><UTF8:{rUnicodeUTF8}>{radUnicode}>
+<ascii:{cPtrAscii}>         <Bad Instructions :{strBadMnems}>
+<asciiprint:{cPtrAsciiPrint}>    <Max gadget size  :{intMaxRopSize}>
+<alphanum:{cPtrAlphaNum}>      <Max gadget offset:{intMaxRopOffset}>
+<alpha:{cPtrAlpha}>         <Max RETN imm16   :{intMaxRetnImm}>
+<numeric:{cPtrNum}>{ptrGroup}>       <Max JOP imm8/32  :{intMaxJopImm}>
+                <Max gadgets      :{intMaxRops}>
+                Other settings   <Allow conditional jumps:{cRopAllowJcc}>
                 <Do not allow bad bytes:{cRopNoBadBytes}>
                 <Search for ROP gadgets:{cRopSearch}>
                 <Search for JOP gadgets:{cJopSearch}>{ropGroup}>
@@ -2078,13 +2100,14 @@ Pointer Charset:                  Search Settings:
                 'cEChooser'       : Form.EmbeddedChooserControl(self.mod, swidth=131),
                 'ptrGroup'        : Form.ChkGroupControl(("cPtrNonull", "cPtrAscii", "cPtrAsciiPrint", "cPtrUnicode",'cPtrAlphaNum','cPtrAlpha','cPtrNum')),
                 'ropGroup'        : Form.ChkGroupControl(('cRopAllowJcc','cRopNoBadBytes','cRopSearch','cJopSearch')),
-                'intMaxRopSize'   : Form.NumericInput(swidth=4,tp=Form.FT_DEC,value=6),
-                'intMaxRopOffset' : Form.NumericInput(swidth=4,tp=Form.FT_DEC,value=40),
-                'intMaxRops'      : Form.NumericInput(swidth=4,tp=Form.FT_DEC,value=0),
-                'intMaxRetn'      : Form.NumericInput(swidth=4,tp=Form.FT_DEC,value=40),
+                'intMaxRopSize'   : Form.NumericInput(swidth=4,tp=Form.FT_DEC,value=self.sploiter.rop.maxRopSize),
+                'intMaxRopOffset' : Form.NumericInput(swidth=4,tp=Form.FT_DEC,value=self.sploiter.rop.maxRopOffset),
+                'intMaxRops'      : Form.NumericInput(swidth=4,tp=Form.FT_DEC,value=self.sploiter.rop.maxRops),
+                'intMaxRetnImm'   : Form.NumericInput(swidth=4,tp=Form.FT_HEX,value=self.sploiter.rop.maxRetnImm),
+                'intMaxJopImm'    : Form.NumericInput(swidth=4,tp=Form.FT_HEX,value=self.sploiter.rop.maxJopImm),
                 'strBadChars'     : Form.StringInput(swidth=70,tp=Form.FT_ASCII),
                 'radUnicode'      : Form.RadGroupControl(("rUnicodeANSI","rUnicodeOEM","rUnicodeUTF7","rUnicodeUTF8")),
-                'strBadMnems'     : Form.StringInput(swidth=70,tp=Form.FT_ASCII,value="leave, int, into, enter, syscall, sysenter, sysexit, sysret, in, out, loop, loope, loopne, lock, rep, repe, repz, repne, repnz"),
+                'strBadMnems'     : Form.StringInput(swidth=80,tp=Form.FT_ASCII,value="leave, int, into, enter, syscall, sysenter, sysexit, sysret, in, out, loop, loope, loopne, lock, rep, repe, repz, repne, repnz"),
                 'FormChangeCb'    : Form.FormChangeCb(self.OnFormChange),
             })
 
@@ -2109,6 +2132,9 @@ Pointer Charset:                  Search Settings:
             # Enable both ROP and JOP search by default
             self.SetControlValue(self.cRopSearch, True)
             self.SetControlValue(self.cJopSearch, True)
+
+            # Skip bad instructions by default
+            self.SetControlValue(self.cRopNoBadBytes, True)
 
         # Form OK pressed
         elif fid == -2:
