@@ -1283,6 +1283,8 @@ class Rop():
 
                         # Unexpected call/jmp instruction
                         elif insn_mnem in ["jmp","call"]:
+                            # TODO: Perform jmp/call nested expansion
+                            #print "out of place jmp/call %08x (%s) - %08x" % (ea, insn_disas, ea_end)
                             return None
 
                         #######################################################
@@ -1946,6 +1948,7 @@ class ModuleView(Choose2):
         self.select_list = list()
 
         # Command callbacks
+        self.cmd_load_module     = None
         self.cmd_search_gadgets  = None
         self.cmd_search_pointers = None
 
@@ -1955,10 +1958,13 @@ class ModuleView(Choose2):
 
         # Add extra context menu commands
         # NOTE: Make sure you check for duplicates
+        if self.cmd_load_module == None:
+            self.cmd_load_module = self.AddCommand("Load module...", flags = idaapi.CHOOSER_POPUP_MENU, icon=135)
         if self.cmd_search_gadgets == None:
             self.cmd_search_gadgets = self.AddCommand("Search gadgets...", flags = idaapi.CHOOSER_POPUP_MENU | idaapi.CHOOSER_MULTI_SELECTION, icon=182 )
         if self.cmd_search_pointers == None:
             self.cmd_search_pointers = self.AddCommand("Search function pointers...", flags = idaapi.CHOOSER_POPUP_MENU | idaapi.CHOOSER_MULTI_SELECTION, icon=143 )
+
 
         return True
 
@@ -2023,6 +2029,18 @@ class ModuleView(Choose2):
             # Selection number
             else:
                 self.select_list.append(n)
+
+        elif cmd_id == self.cmd_load_module:
+
+            module_name = idaapi.askfile_c(1, "*.*", "Please module to load")
+            if module_name:
+                print "[idasploiter] Loading module: %s" % module_name     
+                loadlib = idaapi.Appcall.proto("kernel32_LoadLibraryA", "int __stdcall loadlib(const char *fn);")
+                hmod = loadlib(module_name)
+                if hmod:
+                    print "[idasploiter] Finished loading module: %s" % module_name
+                else:
+                    print "[idasploiter] Could not load: %s" % module_name
 
         return 1
 
