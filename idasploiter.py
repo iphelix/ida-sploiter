@@ -530,18 +530,26 @@ class PE():
 
             if self.load_config_directory and self.load_config_directory.SecurityCookie != 0:
 
-                # Confirm the Security Cookie is not zero
-                if self.arch64:
-                    cookie = idaapi.dbg_read_memory(self.load_config_directory.SecurityCookie, 8)
-                    cookie = struct.unpack("<Q", cookie)[0]
-                else:
-                    cookie = idaapi.dbg_read_memory(self.load_config_directory.SecurityCookie, 4)
-                    cookie = struct.unpack("<I", cookie)[0]
+                # Attempt to read the security cookie
+                # NOTE: The extra exception handler was added to account for cookie being stored in memory locations
+                #       that are not accessible by the debugger (e.g. manually loading win32k.sys, security cookie
+                #       address will point to kernel space which we can't read)
+                try:
+                    # Confirm the Security Cookie is not zero
+                    if self.arch64:
+                        cookie = idaapi.dbg_read_memory(self.load_config_directory.SecurityCookie, 8)
+                        cookie = struct.unpack("<Q", cookie)[0]
+                    else:
+                        cookie = idaapi.dbg_read_memory(self.load_config_directory.SecurityCookie, 4)
+                        cookie = struct.unpack("<I", cookie)[0]
 
-                if cookie != 0:
-                    return "Yes"
-                else:
-                    return "Null"
+                    if cookie != 0:
+                        return "Yes"
+                    else:
+                        return "Null"
+
+                except Exception, e:
+                    return "Inv"
 
             else:
                 return "No"
@@ -1283,8 +1291,6 @@ class Rop():
 
                         # Unexpected call/jmp instruction
                         elif insn_mnem in ["jmp","call"]:
-                            # TODO: Perform jmp/call nested expansion
-                            #print "out of place jmp/call %08x (%s) - %08x" % (ea, insn_disas, ea_end)
                             return None
 
                         #######################################################
@@ -2032,7 +2038,7 @@ class ModuleView(Choose2):
 
         elif cmd_id == self.cmd_load_module:
 
-            module_name = idaapi.askfile_c(1, "*.*", "Please module to load")
+            module_name = idaapi.askfile_c(0, "*.*", "Please select module to load")
             if module_name:
                 print "[idasploiter] Loading module: %s" % module_name     
                 loadlib = idaapi.Appcall.proto("kernel32_LoadLibraryA", "int __stdcall loadlib(const char *fn);")
@@ -2041,6 +2047,8 @@ class ModuleView(Choose2):
                     print "[idasploiter] Finished loading module: %s" % module_name
                 else:
                     print "[idasploiter] Could not load: %s" % module_name
+
+                self.refreshitems()
 
         return 1
 
