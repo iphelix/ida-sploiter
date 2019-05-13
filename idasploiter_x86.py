@@ -1081,7 +1081,7 @@ class x86_Sploiter(Sploiter):
         self.bad_instructions = "leave, int, into, enter, syscall, sysenter, sysexit, sysret, in, out, loop, loope, loopne, lock, rep, repe, repz, repne, repnz"
 
         # Select general purpose registers for a given architecture
-        if self.sploiter.addr64:
+        if self.addr64:
             self.reg_list = ["RAX", "RBX", "RCX", "RDX", "RSP", "RBP", "RSI", "RDI", "RIP", "R8", "R9", "R10", "R11",
                              "R12", "R13", "R14", "R15"]
         else:

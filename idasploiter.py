@@ -2577,8 +2577,13 @@ class SploitManager():
         elif idaapi.ph.id == idaapi.PLFM_PPC:
             self.sploiter = ppc_Sploiter()
         else:
-            idaapi.warning("Current processor type is not supported!")
-            sys.exit(1)
+            self.sploiter = None
+            print("Current processor type is not supported!")
+
+
+    def is_architecture_supported(self):
+        return False if self.sploiter is None else True
+
 
     ###########################################################################
     # Menu Items
@@ -2688,6 +2693,10 @@ class idasploiter_t(plugin_t):
 
         # Initialize the sploit manager.
         idasploiter_manager = SploitManager()
+        if idasploiter_manager.is_architecture_supported() is False:
+            return idaapi.PLUGIN_SKIP
+			
+		# Add menu items.
         if idasploiter_manager.add_menu_items():
             print "Failed to initialize IDA Sploiter."
 
